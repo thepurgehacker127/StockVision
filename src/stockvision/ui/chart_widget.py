@@ -40,7 +40,6 @@ class ChartWidget(QWidget):
         self.chart.setPlotAreaBackgroundVisible(False)
         self.chart.setTitle("")
 
-        # ✅ Use our interactive view instead of plain QChartView
         self.view = InteractiveChartView(self.chart)
         self.view.setRenderHint(QPainter.Antialiasing, True)
 
@@ -77,6 +76,7 @@ class ChartWidget(QWidget):
         self.chart.removeAllSeries()
         self._candle_series = None
         self._line_series.clear()
+        self.view.clear_data()
 
     def set_title(self, text: str):
         self.chart.setTitle(text)
@@ -112,9 +112,10 @@ class ChartWidget(QWidget):
         self.axis_y.setRange(lo - pad, hi + pad)
 
         self.set_title(f"{symbol} — Candlestick Chart")
-
-        # ✅ Reset zoom each time new data loads (optional but feels good)
         self.chart.zoomReset()
+
+        # ✅ Feed candles to the interactive view so tooltip can show OHLC
+        self.view.set_candles(symbol, candles)
 
     def plot_compare(self, symbol_to_candles: Dict[str, List[Candle]], normalize: bool = True):
         self.clear()

@@ -9,7 +9,6 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 from PySide6.QtCharts import (
     QChart,
-    QChartView,
     QDateTimeAxis,
     QValueAxis,
     QCandlestickSeries,
@@ -18,13 +17,13 @@ from PySide6.QtCharts import (
 )
 
 from stockvision.core.market_data import Candle
+from stockvision.ui.interactive_chart_view import InteractiveChartView
 
 
 @dataclass
 class SeriesColors:
-    # Use default_factory because QColor is mutable (dataclasses require this)
-    up: QColor = field(default_factory=lambda: QColor("#2ecc71"))     # green
-    down: QColor = field(default_factory=lambda: QColor("#e74c3c"))   # red
+    up: QColor = field(default_factory=lambda: QColor("#2ecc71"))
+    down: QColor = field(default_factory=lambda: QColor("#e74c3c"))
     grid: QColor = field(default_factory=lambda: QColor(255, 255, 255, 40))
     text: QColor = field(default_factory=lambda: QColor(230, 230, 230, 220))
 
@@ -41,8 +40,8 @@ class ChartWidget(QWidget):
         self.chart.setPlotAreaBackgroundVisible(False)
         self.chart.setTitle("")
 
-        self.view = QChartView(self.chart)
-        # Smooth rendering
+        # ✅ Use our interactive view instead of plain QChartView
+        self.view = InteractiveChartView(self.chart)
         self.view.setRenderHint(QPainter.Antialiasing, True)
 
         layout = QVBoxLayout(self)
@@ -114,6 +113,9 @@ class ChartWidget(QWidget):
 
         self.set_title(f"{symbol} — Candlestick Chart")
 
+        # ✅ Reset zoom each time new data loads (optional but feels good)
+        self.chart.zoomReset()
+
     def plot_compare(self, symbol_to_candles: Dict[str, List[Candle]], normalize: bool = True):
         self.clear()
 
@@ -173,3 +175,4 @@ class ChartWidget(QWidget):
             self.set_title("Comparison — Price")
 
         self.axis_x.setTitleText("Time")
+        self.chart.zoomReset()

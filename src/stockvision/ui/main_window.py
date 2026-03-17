@@ -1,10 +1,10 @@
 ﻿from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QObject
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QToolBar, QStatusBar, QDockWidget, QListWidget, QTextEdit, QFrame,
     QTabWidget, QComboBox, QCheckBox
 )
@@ -14,10 +14,11 @@ from stockvision.ui.chart_widget import ChartWidget
 from stockvision.core.market_data import (
     normalize_symbol, fetch_stooq_daily, fetch_binance_klines, MarketDataError, Candle
 )
+from stockvision.core.settings import load_settings, save_settings, AppSettings
 
 
 class FetchWorker(QObject):
-    finished = Signal(str, object)  # (mode, payload)
+    finished = Signal(str, object)
     failed = Signal(str)
 
     def __init__(self, symbols: List[str], interval: str, compare: bool):
@@ -64,18 +65,24 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("StockVision")
         self.setMinimumSize(1200, 720)
 
-        self._thread: QThread | None = None
-        self._worker: FetchWorker | None = None
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[FetchWorker] = None
+
+        self._default_watchlist = ["AAPL", "MSFT", "TSLA", "NVDA", "BTC-USD", "ETH-USD"]
+        self._settings: AppSettings = load_settings(self._default_watchlist)
 
         self._build_toolbar()
         self._build_statusbar()
         self._build_docks()
         self._build_central()
 
+        # update OHLC bar from crosshair
+        self.chart.crosshair_info.connect(self._on_crosshair_info)
+
         if self.watchlist.count() > 0:
             self.watchlist.setCurrentRow(0)
 
-    # ---------- Top toolbar ----------
+    # ---------- Toolbar ----------
     def _build_toolbar(self):
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -83,16 +90,15 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
         brand_icon = QLabel()
-        pix = qta.icon("fa5s.chart-line", color="#2b72ff").pixmap(18, 18)
-        brand_icon.setPixmap(pix)
+        brand_icon.setPixmap(qta.icon("fa5s.chart-line", color="#2b72ff").pixmap(18, 18))
 
         brand_title = QLabel("StockVision")
         brand_title.setObjectName("BrandTitle")
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search ticker (AAPL, MSFT) or crypto (BTC-USD, ETH-USD)")
+        self.search.setPlaceholderText("Search ticker (AAPL) or crypto (BTC-USD)")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(420)
+        self.search.setMinimumWidth(360)
         self.search.returnPressed.connect(self._add_from_search)
 
         btn_add = QPushButton("Add")
@@ -105,7 +111,13 @@ class MainWindow(QMainWindow):
         self.interval.currentTextChanged.connect(lambda _x: self._refresh())
 
         self.compare = QCheckBox("Compare")
-        self.compare.stateChanged.connect(lambda _s: self._refresh())
+        self.compare.stateChanged.connect(self._on_compare_toggle)
+
+        self.normalize = QCheckBox("Normalize")
+        self.normalize.setChecked(True)
+        self.normalize.setToolTip("Compare mode: show % change from start (on) vs raw price (off)")
+        self.normalize.stateChanged.connect(lambda _s: self._refresh())
+        self.normalize.setEnabled(False)
 
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setIcon(qta.icon("fa5s.sync", color="#e6e6e6"))
@@ -121,18 +133,23 @@ class MainWindow(QMainWindow):
         tb.addWidget(QLabel("Interval: "))
         tb.addWidget(self.interval)
         tb.addWidget(self.compare)
+        tb.addWidget(self.normalize)
         tb.addWidget(btn_refresh)
 
-    # ---------- Status bar ----------
+    def _on_compare_toggle(self, _state):
+        self.normalize.setEnabled(self.compare.isChecked())
+        self._refresh()
+
+    # ---------- Status ----------
     def _build_statusbar(self):
         sb = QStatusBar()
-        sb.showMessage("Ready. Step 3: Candles + comparison charts + data providers.")
+        sb.showMessage("Ready. Step 5: OHLC info bar + axis zoom + watchlist persistence.")
         self.setStatusBar(sb)
 
-    # ---------- Dock panels ----------
+    # ---------- Docks ----------
     def _build_docks(self):
         self.watchlist = QListWidget()
-        self.watchlist.addItems(["AAPL", "MSFT", "TSLA", "NVDA", "BTC-USD", "ETH-USD"])
+        self.watchlist.addItems(self._settings.watchlist)
         self.watchlist.setSelectionMode(QListWidget.ExtendedSelection)
         self.watchlist.itemSelectionChanged.connect(self._refresh)
 
@@ -144,12 +161,11 @@ class MainWindow(QMainWindow):
         self.details = QTextEdit()
         self.details.setReadOnly(True)
         self.details.setText(
-            "Asset Details Panel\n\n"
-            "Step 3:\n"
-            "- Candlesticks (stocks + crypto)\n"
-            "- Compare mode (multi-select)\n"
-            "- Free sources: Stooq (stocks daily), Binance (crypto)\n\n"
-            "Education-only guidance will appear here later (not financial advice)."
+            "Step 5 added:\n"
+            "- OHLC info bar updates with crosshair\n"
+            "- Ctrl+wheel zoom X only, Shift+wheel zoom Y only\n"
+            "- Compare normalize toggle\n"
+            "- Watchlist auto-saves\n"
         )
 
         dock_right = QDockWidget("Details", self)
@@ -159,22 +175,36 @@ class MainWindow(QMainWindow):
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self._log("App started. Step 3 chart engine ready.")
+        self._log("App started. Step 5 UX enhancements active.")
 
         dock_bottom = QDockWidget("Event Log", self)
         dock_bottom.setWidget(self.log)
         dock_bottom.setAllowedAreas(Qt.BottomDockWidgetArea)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock_bottom)
 
-    # ---------- Central workspace ----------
+    # ---------- Central ----------
     def _build_central(self):
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
 
         header = QLabel("Chart Workspace")
         header.setStyleSheet("font-size: 18px; font-weight: 800;")
+
+        # Info bar (TradingView-like)
+        self.ohlc_bar = QLabel("Move mouse over chart → OHLC will appear here.")
+        self.ohlc_bar.setStyleSheet(
+            "padding: 6px 10px; border-radius: 10px; "
+            "background: rgba(27,34,50,0.75); "
+            "border: 1px solid rgba(255,255,255,0.10); "
+            "color: rgba(230,230,230,0.95); font-weight: 600;"
+        )
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(header)
+        top_row.addStretch(1)
+        top_row.addWidget(self.ohlc_bar)
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -182,21 +212,31 @@ class MainWindow(QMainWindow):
         self.chart = ChartWidget()
         frame = QFrame()
         frame.setObjectName("ChartFrame")
-        frame_layout = QVBoxLayout(frame)
-        frame_layout.setContentsMargins(8, 8, 8, 8)
-        frame_layout.addWidget(self.chart)
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(8, 8, 8, 8)
+        fl.addWidget(self.chart)
         self.tabs.addTab(frame, "Chart")
 
-        layout.addWidget(header)
-        layout.addWidget(self.tabs, stretch=1)
+        outer.addLayout(top_row)
+        outer.addWidget(self.tabs, stretch=1)
+
         self.setCentralWidget(root)
 
-    # ---------- Utilities ----------
+    # ---------- Helpers ----------
     def _selected_symbols(self) -> List[str]:
         items = self.watchlist.selectedItems()
         if not items and self.watchlist.currentItem():
             return [self.watchlist.currentItem().text()]
         return [i.text() for i in items]
+
+    def _log(self, msg: str):
+        self.log.append(msg)
+
+    def _save_watchlist(self):
+        wl = [self.watchlist.item(i).text().strip().upper() for i in range(self.watchlist.count())]
+        wl = [x for x in wl if x]
+        self._settings.watchlist = wl
+        save_settings(self._settings)
 
     # ---------- Actions ----------
     def _add_from_search(self):
@@ -209,9 +249,27 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{text} is already in your watchlist.", 2500)
             return
         self.watchlist.addItem(text)
+        self._save_watchlist()
         self._log(f"Added {text} to watchlist.")
         self.statusBar().showMessage(f"Added {text}.", 2500)
         self.search.clear()
+
+    # ---------- Fetch threading ----------
+    def _safe_stop_previous_thread(self):
+        if not self._thread:
+            return
+        try:
+            if self._thread.isRunning():
+                self._thread.quit()
+                self._thread.wait(1200)
+        except RuntimeError:
+            pass
+        self._thread = None
+        self._worker = None
+
+    def _cleanup_after_thread(self):
+        self._thread = None
+        self._worker = None
 
     def _refresh(self):
         symbols = self._selected_symbols()
@@ -226,46 +284,23 @@ class MainWindow(QMainWindow):
 
         self._start_fetch(symbols, interval, compare_mode)
 
-    def _safe_stop_previous_thread(self):
-        if not self._thread:
-            return
-
-        # The thread may already be deleted; touching it raises RuntimeError.
-        try:
-            if self._thread.isRunning():
-                self._thread.quit()
-                self._thread.wait(1200)
-        except RuntimeError:
-            pass
-
-        self._thread = None
-        self._worker = None
-
-    def _cleanup_after_thread(self):
-        # Called when thread finishes (safe to reset references)
-        self._thread = None
-        self._worker = None
-
     def _start_fetch(self, symbols: List[str], interval: str, compare: bool):
         self._safe_stop_previous_thread()
 
-        thread = QThread(self)  # parented so Qt manages lifetime safely
+        thread = QThread(self)
         worker = FetchWorker(symbols=symbols, interval=interval, compare=compare)
         worker.moveToThread(thread)
 
-        # Save references so they don't get GC'd
         self._thread = thread
         self._worker = worker
 
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_data)
+        worker.finished.connect(lambda mode, payload: self._on_data(mode, payload))
         worker.failed.connect(self._on_error)
 
-        # Ensure thread stops
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
 
-        # Cleanup objects safely
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._cleanup_after_thread)
@@ -277,50 +312,57 @@ class MainWindow(QMainWindow):
             symbol, candles = payload  # type: ignore
             self.chart.plot_candles(symbol, candles)
             self.tabs.setTabText(0, symbol)
-            self.details.setText(
-                f"Asset Details: {symbol}\n\n"
-                f"Candles loaded: {len(candles)}\n"
-                "Source:\n"
-                "- Stocks: Stooq (daily)\n"
-                "- Crypto: Binance (interval)\n\n"
-                "Next:\n"
-                "- Live streaming\n"
-                "- Indicators\n"
-                "- Alerts\n"
-            )
             self.statusBar().showMessage(f"Loaded {symbol} candles.", 2500)
             self._log(f"Rendered candles for {symbol} ({len(candles)} points).")
             return
 
         if mode == "compare":
             data = payload  # type: ignore
-            self.chart.plot_compare(data, normalize=True)
+            norm = self.normalize.isChecked()
+            self.chart.plot_compare(data, normalize=norm)
             self.tabs.setTabText(0, "Comparison")
-            self.details.setText(
-                "Comparison Mode\n\n"
-                f"Symbols: {', '.join(data.keys())}\n"
-                "Display: % change from start (normalized)\n\n"
-                "Tip: Multi-select in Watchlist to compare.\n"
-                "Source:\n"
-                "- Stocks: Stooq (daily)\n"
-                "- Crypto: Binance\n"
-            )
             self.statusBar().showMessage("Loaded comparison view.", 2500)
-            self._log(f"Rendered comparison series: {list(data.keys())}")
+            self._log(f"Rendered comparison series: {list(data.keys())} normalize={norm}")
             return
 
     def _on_error(self, message: str):
         self.statusBar().showMessage("Data fetch failed.", 3000)
         self._log(f"❌ {message}")
-        self.details.setText(
-            "Data Fetch Error\n\n"
-            f"{message}\n\n"
-            "Troubleshooting:\n"
-            "- Check internet connection\n"
-            "- Try another symbol\n"
-            "- Crypto uses Binance (try BTC-USD)\n"
-            "- Stocks use Stooq (try AAPL)\n"
-        )
 
-    def _log(self, message: str):
-        self.log.append(message)
+    def closeEvent(self, event):
+        self._save_watchlist()
+        super().closeEvent(event)
+    # ---------- Crosshair info bar ----------
+    def _on_crosshair_info(self, payload_obj: object):
+        try:
+            p = payload_obj  # dict
+            if p.get("has_candle"):
+                self.ohlc_bar.setText(
+                    f"{p.get('symbol','')}  {p.get('candle_time_str','')}   "
+                    f"O {p.get('o',0):.4f}  H {p.get('h',0):.4f}  "
+                    f"L {p.get('l',0):.4f}  C {p.get('c',0):.4f}"
+                )
+            else:
+                self.ohlc_bar.setText(
+                    f"{p.get('symbol','')}  {p.get('time_str','')}   "
+                    f"Y {p.get('y',0):.4f}"
+                )
+        except Exception:
+            pass
+    # ---------- Crosshair info bar ----------
+    def _on_crosshair_info(self, payload_obj: object):
+        try:
+            p = payload_obj  # dict
+            if p.get("has_candle"):
+                self.ohlc_bar.setText(
+                    f"{p.get('symbol','')}  {p.get('candle_time_str','')}   "
+                    f"O {p.get('o',0):.4f}  H {p.get('h',0):.4f}  "
+                    f"L {p.get('l',0):.4f}  C {p.get('c',0):.4f}"
+                )
+            else:
+                self.ohlc_bar.setText(
+                    f"{p.get('symbol','')}  {p.get('time_str','')}   "
+                    f"Y {p.get('y',0):.4f}"
+                )
+        except Exception:
+            pass
